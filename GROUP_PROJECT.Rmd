@@ -1,0 +1,992 @@
+---
+title: "Group_project"
+author: "Chu Lin"
+date: "2025-11-04"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/clin0/OneDrive/Desktop/DSE Applied stastics/Projects/Group_project/datasets")
+```
+
+```{r}
+getwd()
+
+list.files()
+```
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(tidyr)
+library(corrplot)
+library(vars)
+library(lmtest)
+library(tsibble)
+library(lubridate)
+library(urca)
+library(tseries)
+library(patchwork)
+library(forecast)
+library(tsDyn)
+library(lubridate)
+```
+
+```{r}
+df <- read.csv("Monthly_Earliest_Index_1919-2025.csv")
+
+df <- df %>%
+  mutate(date = as.Date(date)) %>%
+  as_tsibble(index = date)
+
+head(df)
+```
+
+```{r}
+select
+```
+
+```{r}
+df_BOF <- df %>%
+  dplyr::select(
+    date,
+    market_yield_val,
+    unemploy_val,
+    ind_prod_val,
+    volatility_val,
+    aaa_corp_bond_val,
+    bbb_corp_bond_val
+  ) %>%
+  mutate(date = as.Date(date)) %>%
+  filter(date >= as.Date("1997-01-01")) %>%
+  filter(!(date >= as.Date("2020-01-01") & date <= as.Date("2021-12-31")))
+
+
+head(df_BOF)
+```
+
+
+-------------------------------------------------------------------
+-------------------------------------------------------------------
+-------------------------------------------------------------------
+Here is what we should focus on below:
+
+
+
+#evaluate 
+
+
+```{r}
+library(ggplotify)
+
+
+vars <- names(df_BOF)[names(df_BOF) != "date"]
+
+for (v in vars) {
+  
+  cat("========================================\n")
+  cat("variable：", v, "\n")
+  cat("========================================\n\n")
+  
+  x <- ts(df_BOF[[v]], start=c(1997,1), frequency=12)
+  dx <- diff(x)
+
+  # row data
+  df_raw <- data.frame(
+    time = as.numeric(time(x)),
+    value = as.numeric(x)
+  )
+  
+  p1 <- ggplot(df_raw, aes(time, value)) +
+    geom_line() +
+    ggtitle(paste(v, "- raw data"))
+
+  # diff once
+  df_dx <- data.frame(time = as.numeric(time(dx)), value = as.numeric(dx))
+  p2 <- ggplot(df_dx, aes(time, value)) +
+    geom_line() +
+    ggtitle(paste(v, "- diff once"))
+
+  # ACF
+  acf_obj <- acf(x, plot = FALSE, lag.max = 40)
+  acf_df <- data.frame(
+    lag = acf_obj$lag[-1],
+    acf = acf_obj$acf[-1]
+  )
+  
+  Tn <- length(x)
+
+  bart_var <- sapply(1:nrow(acf_df), function(k) {
+    if (k == 1) return(1/Tn)
+    return( (1/Tn) * (1 + 2 * sum(acf_df$acf[1:(k-1)]^2)) )
+  })
+
+  acf_df$upper <-  1.96 * sqrt(bart_var)
+  acf_df$lower <- -1.96 * sqrt(bart_var)
+
+  p3 <- ggplot(acf_df, aes(lag, acf)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), 
+                fill = "skyblue", alpha = 0.3) +
+    geom_segment(aes(xend = lag, yend = 0)) +
+    geom_point(size = 1.8) +
+    geom_hline(yintercept = 0) +
+    ggtitle(paste(v, "- ACF (Bartlett CI fan shape)"))
+
+  # PACF
+  p4 <- as.ggplot(function() {
+    pacf(x, lag.max = 40, main = paste(v, "- PACF"))
+  })
+
+  #Distribution
+  df_res <- data.frame(x = as.numeric(x))
+  p5 <- ggplot(df_res, aes(x)) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill="skyblue") +
+    geom_density(color="red") +
+    ggtitle(paste(v, "- Distribution"))
+
+  # rolling
+  roll_mean <- zoo::rollmean(x, k = 12, fill = NA)
+  df_roll <- data.frame(
+    time = as.numeric(time(x)),
+    x = as.numeric(x),
+    rm = as.numeric(roll_mean)
+  )
+
+  p6 <- ggplot(df_roll, aes(time)) +
+    geom_line(aes(y=x), color="black") +
+    geom_line(aes(y=rm), color="red") +
+    ggtitle(paste(v, "- Rolling Mean (12M)"))
+
+  #------------------------------------------------
+  print((p1 | p2) / (p3 | p4) / (p5 | p6))
+}
+
+```
+
+
+
+# ADF test and Difference
+
+Before we go forward to models, we have to keep them stationary.
+
+ADF Test:
+H0: This is not stationary
+H1: This is stationary
+
+
+Lag selection:
+
+```{r}
+test <- ur.df(df_BOF$market_yield_val, type="trend", lags=1, selectlags="Fixed")
+
+sapply(slotNames(test), function(s) class(slot(test, s)))
+
+```
+
+
+ADF equation:
+$$
+\Delta y_t
+= \alpha 
++ \beta t
++ \gamma y_{t-1}
++ \sum_{i=1}^{p} \delta_i \Delta y_{t-i}
++ \varepsilon_t . 
+$$
+Using AIC/BIC to evaluate.
+
+$$
+AIC=−2log(L)+2k
+$$
+$$
+BIC=−2log(L)+klog(n)
+$$
+
+
+Set the equation manually to find the lag number:
+
+
+
+
+Setting ADF:
+```{r}
+ts_data <- ts(df_BOF, start = c(1997,1),frequency = 12)
+
+adf.test(ts_data[,"market_yield_val"],k=1)
+adf.test(ts_data[,"unemploy_val"],k=1)
+adf.test(ts_data[,"ind_prod_val"],k=1)
+adf.test(ts_data[,"volatility_val"],k=1)
+adf.test(ts_data[,"aaa_corp_bond_val"],k=1)
+adf.test(ts_data[,"bbb_corp_bond_val"],k=1)
+```
+
+
+
+P-value > 0.05, which means Null hypothesis is true.  
+
+But, is it true? 
+
+
+
+Here is Kpss test:
+
+H0: stationary
+H1: none stationary
+```{r}
+# Level
+kpss.test(ts_data[,"unemploy_val"],null = "Level")
+kpss.test(ts_data[,"ind_prod_val"],null = "Level")
+kpss.test(ts_data[,"volatility_val"],null = "Level")
+```
+
+```{r}
+kpss.test(ts_data[,"unemploy_val"],null = "Trend")
+kpss.test(ts_data[,"ind_prod_val"],null = "Trend")
+kpss.test(ts_data[,"volatility_val"],null = "Trend")
+```
+
+
+Lets look at the box plots:
+```{r}
+df_long <- df_BOF %>% 
+  dplyr::select(date, market_yield_val, ind_prod_val, volatility_val, unemploy_val, aaa_corp_bond_val, bbb_corp_bond_val) %>%
+  pivot_longer(
+    cols = -date,
+    names_to = "variable",
+    values_to = "value"
+  )
+
+ggplot(df_long, aes(x = variable, y = value, fill = variable)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "Boxplots of Differenced Series",
+    x = "Variable",
+    y = "Value"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+```
+So, I think the residual affect the test well.
+
+
+Here is simply to confirm whether the data is truly stable by ur.df methods.(by paper method)
+compare the lag I selected to auto select lag number.
+```{r}
+summary(ur.df(ts_data[,"unemploy_val"], type = "trend", lags = 1))
+summary(ur.df(ts_data[,"unemploy_val"], type = "trend", selectlags = "AIC"))
+```
+
+
+```{r}
+summary(ur.df(ts_data[,"ind_prod_val"], type = "trend", lags = 1))
+summary(ur.df(ts_data[,"ind_prod_val"], type = "trend", selectlags = "AIC"))
+```
+
+
+```{r}
+summary(ur.df(ts_data[,"volatility_val"], type = "trend", lags = 1))
+summary(ur.df(ts_data[,"volatility_val"], type = "trend", selectlags = "AIC"))
+```
+
+
+How to know if they are stable, 
+look at the A = tau3(5pct): -3.42 and  B = The first number of Value of test-statistic: -5.9771
+And, if B < A, which means it is stationary data. I(0), so I found out vol and ind are I(0).
+
+But why ur.df shows they are stable?
+
+
+
+
+Here is the data after diff once
+```{r}
+df_BOF_diff <- df_BOF %>%
+  mutate(across(
+    .cols = -date,
+    .fns  = ~ c(NA, diff(.)),
+    .names = "d_{.col}"
+  )) %>%
+  slice(-1)
+
+orig_vars <- names(df_BOF)[names(df_BOF) != "date"]
+
+head(df_BOF_diff)
+```
+
+
+
+Using for loop to make their ACF and PACF plots
+```{r}
+for (v in orig_vars) {
+
+  # raw and diff series
+  raw_series  <- ts(df_BOF[[v]], start = c(1997,1), frequency = 12)
+  diff_series <- ts(df_BOF_diff[[paste0("d_", v)]], start = c(1997,2), frequency = 12)
+
+  # ACF
+  p_raw_acf <- ggAcf(raw_series) +
+    ggtitle(paste("ACF of", v)) +
+    theme_minimal(base_size = 14)
+
+  p_diff_acf <- ggAcf(diff_series) +
+    ggtitle(paste("ACF of", paste0("d_", v))) +
+    theme_minimal(base_size = 14)
+
+  # PACF
+  p_raw_pacf <- ggPacf(raw_series) +
+    ggtitle(paste("PACF of", v)) +
+    theme_minimal(base_size = 14)
+
+  p_diff_pacf <- ggPacf(diff_series) +
+    ggtitle(paste("PACF of", paste0("d_", v))) +
+    theme_minimal(base_size = 14)
+
+  # Combine into 2×2 layout
+  full_plot <- (p_raw_acf | p_diff_acf) /
+               (p_raw_pacf | p_diff_pacf)
+
+  print(full_plot)
+}
+
+```
+
+
+
+
+
+```{r}
+ts_data_diff <- ts(df_BOF_diff, start = c(1997,1),frequency = 12)
+
+summary(ur.df(ts_data_diff[,"d_ind_prod_val"], type = "trend", selectlags = "AIC"))
+```
+
+
+here is what we should do next?
+______________________________________________________
+______________________________________________________
+we have I(1), we can do cointegration test such as Johansen
+
+if it passes, then VAR, if not, maybe ARIMA, test white noise
+
+
+```{r}
+df_aaa <- df_BOF %>%
+ dplyr::select(
+    aaa_corp_bond_val,
+    market_yield_val,
+    unemploy_val,
+    ind_prod_val
+  ) %>%
+  mutate(across(everything(), as.numeric)) %>% 
+  na.omit()
+
+lag_sel2 <- VARselect(df_aaa, lag.max = 12, type = "trend")
+lag_sel2$selection
+
+p_opt2 <- as.integer(lag_sel2$selection["AIC(n)"])
+p_opt2
+
+
+df_bbb <- df_BOF %>%
+ dplyr::select(
+    bbb_corp_bond_val,
+    market_yield_val,
+    unemploy_val,
+    ind_prod_val
+  ) %>%
+  mutate(across(everything(), as.numeric)) %>% 
+  na.omit()
+
+lag_sel1 <- VARselect(df_bbb, lag.max = 12, type = "trend")
+lag_sel1$selection
+
+p_opt1 <- as.integer(lag_sel1$selection["AIC(n)"])
+p_opt1
+
+```
+
+
+Using Johensen Test aaa_df's r.
+```{r}
+ts_aaa <- ts(df_aaa, start = c(1997,1), frequency = 12)
+
+johansen_test_aaa <- ca.jo(
+  ts_aaa,
+  type = "trace",
+  ecdet = "trend",
+  K = 2
+)
+
+summary(johansen_test_aaa)
+```
+
+
+
+
+# models and prediction
+
+For aaa's vector prediction (same as bbb):
+$$
+Y_t =
+\begin{pmatrix}
+aaa_t \\
+market\_yield_t \\
+ind\_prod_t \\
+unemploy_t
+\end{pmatrix}.
+$$
+
+
+Johansen’s test indicates one cointegration relation \((r = 1)\).  
+Thus, the VECM is:
+$$
+\Delta Y_t
+= \alpha \beta' Y_{t-1}
++ \sum_{i=1}^{p-1} \Gamma_i \Delta Y_{t-i}
++ u_t.
+$$
+
+The long-run equilibrium (cointegration vector) is:
+$$
+\beta' Y_{t-1}
+= aaa_{t-1}
+- \beta_1 \cdot market\_yield_{t-1}
+- \beta_2 \cdot ind\_prod_{t-1}
+- \beta_3 \cdot unemploy_{t-1}.
+$$
+
+
+
+Using Time Series cross-Validation :
+  Setting cross parameters
+
+
+I want to make a function to auto select the rank:
+```{r}
+get_rank <- function(jo, cval_level = "5pct") {
+  tst <- jo@teststat
+  tst_vec <- if (is.matrix(tst)) as.numeric(tst[, 1]) else as.numeric(tst)
+  
+  cv <- jo@cval
+  if (is.matrix(cv)) {
+    cn <- colnames(cv)
+    pick_col <- which(grepl("5", cn, ignore.case = TRUE)[1])
+    if (is.na(pick_col) || length(pick_col) == 0) pick_col <- 1
+    cval_vec <- as.numeric(cv[, pick_col])
+  } else {
+    cval_vec <- as.numeric(cv)
+  }
+  
+  n <- min(length(tst_vec), length(cval_vec))
+  tst_vec <- tst_vec[1:n]
+  cval_vec <- cval_vec[1:n]
+  
+  r <- sum(tst_vec > cval_vec)
+  return(r)
+}
+```
+
+
+```{r}
+library(corrplot)
+
+train_data_all <- as.matrix(df_aaa[, c(
+  "aaa_corp_bond_val", 
+  "market_yield_val", 
+  "unemploy_val", 
+  "ind_prod_val"
+)])
+
+correlation_matrix <- cor(train_data_all, use = "pairwise.complete.obs")
+
+print("Correlation Matrix of Features:")
+print(correlation_matrix)
+
+corrplot(correlation_matrix, method = "circle", type = "upper", tl.col = "black", tl.srt = 45)
+```
+
+
+```{r}
+
+library(vars)
+library(urca)
+library(lubridate)
+library(ggplot2)
+
+
+start_year <- 1997
+end_year <- 2025
+initial_train_end <- 2004
+max_lag_try <- 8   
+
+df_aaa$date <- as.Date(df_aaa$date)
+dates <- df_aaa$date
+
+ts_aaa <- df_aaa[, c(
+  "aaa_corp_bond_val",
+  "unemploy_val",
+  "ind_prod_val"
+)]
+```
+
+
+
+Yearly:
+```{r}
+
+all_pred_year <- data.frame(
+  date = as.Date(character()),
+  real = numeric(),
+  pred = numeric(),
+  lower = numeric(),
+  upper = numeric(),
+  method = character(),
+  stringsAsFactors = FALSE
+)
+
+N_AHEAD_TEST <- 12
+
+suppress_warns <- FALSE
+
+for (yr in initial_train_end:(end_year - 1)) {
+
+  train_idx <- which(year(dates) <= yr)
+  test_idx_all <- which(year(dates) == yr + 1)
+  if (length(test_idx_all) == 0) next
+  
+  if (length(test_idx_all) < N_AHEAD_TEST) next
+  test_idx <- test_idx_all[N_AHEAD_TEST]
+  
+  if (dates[max(train_idx)] >= dates[test_idx]) stop("future leaking")
+
+  cat("Training:", dates[min(train_idx)], "to", dates[max(train_idx)],
+      "| Predicting (n=", N_AHEAD_TEST, "):", dates[test_idx], "\n")
+
+  train_data <- ts_aaa[train_idx, , drop = FALSE]
+  test_data  <- ts_aaa[test_idx, , drop = FALSE]
+  
+  train_data <- as.matrix(
+    data.frame(
+      lapply(train_data, function(x) as.numeric(as.character(x))),
+      stringsAsFactors = FALSE
+      )
+    )
+  test_data <- as.numeric(as.character(test_data[,1]))
+
+  if (nrow(train_data) <= max_lag_try + 1) {
+    p_opt <- max(1, floor(nrow(train_data)/5))
+  } else {
+    vs <- VARselect(train_data, lag.max = max_lag_try, type = "trend")
+    if (!is.null(vs$selection) && "AIC(n)" %in% names(vs$selection)) {
+      p_opt <- as.integer(vs$selection["AIC(n)"])
+    } else if (!is.null(vs$criteria)) {
+      p_opt <- which.min(vs$criteria["AIC", ])
+    } else {
+      p_opt <- 2
+    }
+    if (is.na(p_opt) || p_opt < 1) p_opt <- 1
+  }
+
+  ca_call <- function() ca.jo(train_data, type = "trace", ecdet = "trend", K = p_opt)
+  jo_aaa <- if (suppress_warns) suppressWarnings(ca_call()) else ca_call()
+  r <- tryCatch(get_rank(jo_aaa), error = function(e) 0)
+
+  if (r == 0) {
+    
+    diff_train <- diff(train_data)
+
+    if (nrow(diff_train) < (max_lag_try + 1)) {
+      var_model <- if (suppress_warns)
+        suppressWarnings(VAR(train_data, p = p_opt, type = "const"))
+      else
+        VAR(train_data, p = p_opt, type = "trend")
+
+      fc <- predict(var_model, n.ahead = N_AHEAD_TEST)
+
+      pred_val   <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "fcst"])
+      pred_lower <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "lower"])
+      pred_upper <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "upper"])
+      method_used <- "VAR_level_no_coin"
+    } else {
+      vs_diff <- VARselect(diff_train, lag.max = max_lag_try, type = "const")
+      p_diff  <- vs_diff$selection["AIC(n)"]
+      if (is.na(p_diff) || p_diff < 1) p_diff <- 1
+
+      var_diff <- if (suppress_warns)
+        suppressWarnings(VAR(diff_train, p = p_diff, type = "const"))
+      else
+        VAR(diff_train, p = p_diff, type = "const")
+
+      fc_diff <- predict(var_diff, n.ahead = N_AHEAD_TEST)
+
+      pred_diff   <- as.numeric(fc_diff$fcst[[1]][N_AHEAD_TEST, "fcst"])
+      lower_diff  <- tryCatch(as.numeric(fc_diff$fcst[[1]][N_AHEAD_TEST, "lower"]), error = function(e) NA)
+      upper_diff  <- tryCatch(as.numeric(fc_diff$fcst[[1]][N_AHEAD_TEST, "upper"]), error = function(e) NA)
+
+      last_val <- as.numeric(train_data[nrow(train_data), 1])
+      pred_val   <- last_val + cumsum(fc_diff$fcst[[1]][, "fcst"])[N_AHEAD_TEST] 
+      pred_lower <- last_val + lower_diff
+      pred_upper <- last_val + upper_diff
+      method_used <- paste0("VAR_diff_p", p_diff)
+    }
+
+  } else {
+    
+    var_model_from_jo <- if (suppress_warns)
+      suppressWarnings(vec2var(jo_aaa, r = r))
+    else
+      vec2var(jo_aaa, r = r)
+
+    pred_list <- predict(var_model_from_jo, n.ahead = N_AHEAD_TEST)
+    first_var_name <- colnames(train_data)[1]
+
+    if (!is.null(pred_list$fcst) && first_var_name %in% names(pred_list$fcst)) {
+      pred_val   <- as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "fcst"])
+      pred_lower <- tryCatch(as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "lower"]), error = function(e) NA)
+      pred_upper <- tryCatch(as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "upper"]), error = function(e) NA)
+    } else {
+      pred_val   <- as.numeric(pred_list$fcst[[1]][N_AHEAD_TEST, 1])
+      pred_lower <- NA
+      pred_upper <- NA
+    }
+    method_used <- paste0("VECM_r", r)
+  }
+
+  real_val <- as.numeric(test_data[[1]])
+
+  all_pred_year <- rbind(all_pred_year, data.frame(
+    date   = dates[test_idx],
+    real   = real_val,
+    pred   = pred_val,
+    lower  = pred_lower,
+    upper  = pred_upper,
+    method = method_used,
+    stringsAsFactors = FALSE
+  ))
+
+  cat("Year", yr, ": p_opt =", p_opt, ", r =", r, ", method =", method_used, "\n")
+}
+```
+
+
+
+monthly:
+```{r}
+library(vars)
+library(aTSA) 
+library(lubridate)
+
+
+
+
+initial_train_end_idx <- which(year(dates) == initial_train_end & month(dates) == 12)
+if (length(initial_train_end_idx) == 0) {
+  initial_train_end_idx <- max(which(year(dates) == initial_train_end))
+  if (length(initial_train_end_idx) == 0 || initial_train_end_idx < max_lag_try + 2) {
+    stop("Initial training period is too short or year not found.")
+  }
+} else {
+  initial_train_end_idx <- initial_train_end_idx[1]
+}
+
+all_pred <- data.frame(
+  date = as.Date(character()),
+  real = numeric(),
+  pred = numeric(),
+  lower = numeric(),
+  upper = numeric(),
+  method = character(),
+  stringsAsFactors = FALSE
+)
+
+suppress_warns <- FALSE
+
+for (i in seq(from = initial_train_end_idx, to = (nrow(ts_aaa) - N_AHEAD_TEST))) {
+  
+  train_idx <- 1:i
+  test_idx  <- i + N_AHEAD_TEST
+  
+  train_data <- ts_aaa[train_idx, , drop = FALSE]
+  test_data  <- ts_aaa[test_idx, , drop = FALSE]
+
+  train_data <- as.matrix(
+    data.frame(
+      lapply(train_data, function(x) as.numeric(as.character(x))),
+      stringsAsFactors = FALSE
+      )
+    )
+  
+  if (nrow(train_data) <= max_lag_try + 1) {
+    p_opt <- max(1, floor(nrow(train_data)/5))
+  } else {
+    vs <- VARselect(train_data, lag.max = max_lag_try, type = "trend")
+    if (!is.null(vs$selection) && "AIC(n)" %in% names(vs$selection)) {
+      p_opt <- as.integer(vs$selection["AIC(n)"])
+    } else if (!is.null(vs$criteria)) {
+      p_opt <- which.min(vs$criteria["AIC", ])
+    } else {
+      p_opt <- 2
+    }
+    if (is.na(p_opt) || p_opt < 1) p_opt <- 1
+  }
+
+  ca_call <- function() ca.jo(train_data, type = "trace", ecdet = "trend", K = p_opt)
+  jo_aaa <- if (suppress_warns) suppressWarnings(ca_call()) else ca_call()
+  
+  r <- tryCatch(get_rank(jo_aaa), error = function(e) 0)
+
+  if (r == 0) {
+    
+    diff_train <- diff(train_data)
+
+    if (nrow(diff_train) < (max_lag_try + 1)) {
+        var_model <- if (suppress_warns) suppressWarnings(VAR(train_data, p = p_opt, type = "const")) else VAR(train_data, p = p_opt, type = "trend")
+        fc <- predict(var_model, n.ahead = N_AHEAD_TEST)
+        
+        pred_val    <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "fcst"])
+        pred_lower  <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "lower"])
+        pred_upper  <- as.numeric(fc$fcst[[1]][N_AHEAD_TEST, "upper"])
+        method_used <- "VAR_level_no_coin"
+    } else {
+        vs_diff <- VARselect(diff_train, lag.max = max_lag_try, type = "const")
+        p_diff  <- vs_diff$selection["AIC(n)"]
+        if (is.na(p_diff) || p_diff < 1) p_diff <- 1
+
+        var_diff <- if (suppress_warns) suppressWarnings(VAR(diff_train, p = p_diff, type = "const")) else VAR(diff_train, p = p_diff, type = "const")
+
+        fc_diff <- predict(var_diff, n.ahead = N_AHEAD_TEST)
+
+        last_val <- as.numeric(train_data[nrow(train_data), 1])
+        
+        pred_val    <- last_val + cumsum(fc_diff$fcst[[1]][, "fcst"])[N_AHEAD_TEST]
+        pred_lower  <- last_val + tryCatch(as.numeric(fc_diff$fcst[[1]][N_AHEAD_TEST, "lower"]), error = function(e) NA)
+        pred_upper  <- last_val + tryCatch(as.numeric(fc_diff$fcst[[1]][N_AHEAD_TEST, "upper"]), error = function(e) NA)
+        method_used <- paste0("VAR_diff_p", p_diff)
+    }
+    
+  } else {
+    
+    var_model_from_jo <- if (suppress_warns) suppressWarnings(vec2var(jo_aaa, r = r)) else vec2var(jo_aaa, r = r)
+    pred_list <- predict(var_model_from_jo, n.ahead = N_AHEAD_TEST)
+
+    first_var_name <- colnames(train_data)[1]
+
+    if (first_var_name %in% names(pred_list$fcst)) {
+      pred_val    <- as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "fcst"])
+      pred_lower <- tryCatch(as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "lower"]), error = function(e) NA)
+      pred_upper <- tryCatch(as.numeric(pred_list$fcst[[first_var_name]][N_AHEAD_TEST, "upper"]), error = function(e) NA)
+    } else {
+      pred_val <- as.numeric(pred_list$fcst[[1]][N_AHEAD_TEST, 1])
+      pred_lower <- NA
+      pred_upper <- NA
+    }
+
+    method_used <- paste0("VECM_r", r)
+  }
+
+  real_val <- as.numeric(test_data[[1]])
+
+  all_pred <- rbind(all_pred, data.frame(
+    date  = dates[test_idx],
+    real  = real_val,
+    pred  = pred_val,
+    lower = pred_lower,
+    upper = pred_upper,
+    method = method_used,
+    stringsAsFactors = FALSE
+  ))
+}
+
+```
+
+
+```{r}
+all_pred <- na.omit(all_pred)
+rmse_val <- sqrt(mean((all_pred$real - all_pred$pred)^2, na.rm = TRUE))
+cat("RMSE:", rmse_val, "\n")
+
+a2 <- ggplot(all_pred, aes(x = date)) +
+  geom_line(aes(y = real), size = 0.8, color = "blue") +
+  geom_line(aes(y = pred), linetype = "dashed", size = 0.8, color = "red") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "red", alpha = 0.1) +
+  labs(title = "Actual vs Predicted (Rolling Forecast)",
+       subtitle = paste0("RMSE = ", round(rmse_val, 6)),
+       y = "aaa_corp_bond_val") +
+
+  coord_cartesian(ylim = c(0, 8)) +
+  theme_minimal()
+
+
+df_aaa_filtered <- df_aaa[df_aaa$date >= as.Date("2004-02-01"), ]
+
+a1 <- ggplot(df_aaa_filtered, aes(x = date)) +
+  geom_line(aes(y = aaa_corp_bond_val), size = 0.8) +
+  labs(y = "aaa_corp_bond_val") +
+  theme_minimal()
+
+a1 / a2
+```
+
+```{r}
+all_pred_year <- na.omit(all_pred_year)
+
+rmse_val_year <- sqrt(mean((all_pred_year$real - all_pred_year$pred)^2, na.rm = TRUE))
+cat("RMSE:", rmse_val_year, "\n")
+
+
+a3 <- ggplot(all_pred_year, aes(x = date)) +
+  geom_line(aes(y = real), size = 0.8, color = "blue") +
+  geom_line(aes(y = pred), linetype = "dashed", size = 0.8, color = "red") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "lightblue", alpha = 0.2) +
+  labs(title = "Actual vs Predicted (Rolling Forecast)",
+       subtitle = paste0("RMSE = ", round(rmse_val_year, 6)),
+       y = "aaa_corp_bond_val") +
+
+  coord_cartesian(ylim = c(0, 8)) + 
+  theme_minimal()
+
+df_aaa_year <- df_aaa[df_aaa$date >= as.Date("2004-01-01"), ]
+
+a4 <- ggplot(df_aaa_year, aes(x = date)) +
+  geom_line(aes(y = aaa_corp_bond_val), size = 0.8) +
+  labs(y = "aaa_corp_bond_val") +
+  theme_minimal()
+
+a3 / a4
+```
+
+```{r}
+all_pred$residual <- all_pred$real - all_pred$pred
+
+b1 <- ggplot(all_pred, aes(x = pred, y = residual)) +
+  geom_point(alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Residual vs Predicted") +
+  theme_minimal()
+
+b2 <- ggplot(all_pred, aes(x = residual)) +
+  geom_density(fill = "skyblue", alpha = 0.6) +
+  labs(title = "Residual KDE Density",
+       x = "Residual",
+       y = "Density") +
+  theme_minimal()
+
+b1/b2
+```
+
+```{r}
+lag_select <- VARselect(ts_aaa, lag.max = 16, type = "const")
+
+p_opt <- lag_select$selection["AIC(n)"]
+p_opt
+```
+
+```{r}
+var_model_full <- VAR(ts_aaa, p = p_opt, type = "const")
+
+gc2 <- causality(var_model_full, cause = "unemploy_val")
+
+gc3 <- causality(var_model_full, cause = "ind_prod_val")
+
+gc2
+gc3
+```
+
+```{r}
+ts_unemploy <- df_aaa[, c("aaa_corp_bond_val", "unemploy_val")]
+ts_ind <- df_aaa[, c("aaa_corp_bond_val", "ind_prod_val")]
+
+
+lag_unemploy <- VARselect(ts_unemploy, lag.max = 16, type = "const")
+output <- lag_unemploy$selection["AIC(n)"]
+
+var_model_unemploy <- VAR(ts_unemploy, p = output, type = "const")
+gc_employ <- causality(var_model_unemploy, cause = "unemploy_val")
+gc_employ
+```
+```{r}
+lag_ind <- VARselect(ts_ind, lag.max = 16, type = "const")
+output_ind <- lag_ind$selection["AIC(n)"]
+
+var_model_ind <- VAR(ts_ind, p = output_ind, type = "const")
+gc_ind <- causality(var_model_ind, cause = "ind_prod_val")
+gc_ind
+```
+
+
+
+
+```{r}
+ts_1 <- df_aaa[, c("unemploy_val", "ind_prod_val")]
+
+
+lag_1 <- VARselect(ts_1, lag.max = 16, type = "const")
+out1 <- lag_1$selection["AIC(n)"]
+
+var_model_1 <- VAR(ts_1, p = out1, type = "const")
+gc_1 <- causality(var_model_1, cause = "unemploy_val")
+gc_1
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

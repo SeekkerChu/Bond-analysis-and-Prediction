@@ -1,5 +1,7 @@
 Trying to find the correlation between features such as: inflation, unemploy rate, ect. To predict market bond, aaa and bbb companies.
 
+Note: This project is still optimizing, since I don't familiar with time serier models/
+
 1. Import libraies:
 library(dplyr)
 library(ggplot2)
@@ -24,3 +26,4 @@ library(lubridate)
 4. Based on ADF and Johansen test, select which model we should use. (VAR/VECM)
 
 5. Granger test
+
